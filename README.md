@@ -1,123 +1,77 @@
-Here’s a guide + example Docker setup to dockerize the TodoMVC / JavaScript-ES6 (webpack) version. If you prefer a different web server (nginx, http-server, etc.) or want multi-stage build, I can adjust.
+Kubernetes
+EKS + Terraform Deployment of TodoMVC (JavaScript-ES6)
+Required Resources
+1. Pod Identity
 
-What we need to cover
+Kubernetes uses Service Accounts to assign permissions to Pods.
 
-From the repo, here's what the app expects:
+AWS uses IAM Roles to grant access to resources.
 
-Node.js (≥ 18.13.0) + npm (≥ 8.19.3) to build. 
-GitHub
+Pod Identity allows you to link a Kubernetes Service Account with an AWS IAM Role.
 
-A build step: npm install then npm run build → this produces static files in dist folder. 
-GitHub
+When a Pod uses the linked Service Account, it automatically inherits the IAM Role’s permissions.
 
-Local dev mode: npm run dev runs a dev server on port 7001. 
-GitHub
+A Pod Identity Agent acts as a broker in the background.
 
-So our Docker container should:
+It runs in the kube-system namespace.
 
-Install node, copy code.
+We don’t manually configure it, but we should know that all service account ↔ IAM Role links pass through it.
 
-Run build to get static assets.
+For TodoMVC, Pod Identity isn’t strictly required (since the app is static), but if you extend it (e.g., with S3 bucket access for storing tasks), Pod Identity is the secure way to grant those permissions.
 
-Serve those static assets via a server (can be simple with e.g. npm run dev or using static file server).
+2. EBS-CSI (Elastic Block Store Container Storage Interface)
 
-Example Dockerfile
+Persistent storage in AWS EKS is managed by the EBS-CSI driver.
 
-Here’s a Dockerfile that uses a multi-stage build to keep the final image small, serving the built static files via a simple static file server (e.g. nginx or http-server). I’ll show with nginx:
+The driver runs as a controller pod in the kube-system namespace.
 
-# Stage 1: build
-FROM node:18-alpine AS build
+It authenticates with AWS through Pod Identity when creating new volumes.
 
-WORKDIR /app
+In our case, TodoMVC is a static web app and can be served statelessly (no EBS required).
 
-# copy package files
-COPY package*.json ./
-# copy webpack config etc
-COPY webpack.* ./
-# copy source and other files
-COPY src ./src
-COPY public ./public   # if there's a public folder, adjust if not
-COPY . /app
+If the app evolves into a backend service (with a database or persistent cache), EBS-CSI can provide reliable storage volumes.
 
-RUN npm install --legacy-peer-deps
-RUN npm run build
+Architectures
+Monolithic Architecture (TodoMVC as a single Pod)
 
-# Stage 2: serve with nginx
-FROM nginx:stable-alpine
+The entire app is packaged into one container image (static files + web server like nginx).
 
-# Remove default nginx configuration
-RUN rm /etc/nginx/conf.d/default.conf
+Deployment is straightforward:
 
-# Copy a simple nginx config; you may adjust as needed
-COPY nginx.conf /etc/nginx/conf.d/todomvc.conf
+One Deployment resource manages replicas of the TodoMVC container.
 
-# Copy built files from build stage
-COPY --from=build /app/dist /usr/share/nginx/html
+One Service (type: LoadBalancer) exposes the app externally via an AWS ELB.
 
-# Expose port
-EXPOSE 80
+Scaling is possible by increasing the number of replicas.
 
-CMD ["nginx", "-g", "daemon off;"]
+Since TodoMVC is static and does not need a database, this is the most cost-efficient option.
 
-Example nginx.conf
+Limitations:
 
-Here is a minimal nginx config for static files:
+No modularity.
 
-server {
-    listen 80;
-    server_name  localhost;
+Any future feature requiring backend logic would force us to rebuild and redeploy the whole monolith.
 
-    root /usr/share/nginx/html;
-    index index.html;
+Microservices Architecture (if we extend TodoMVC)
 
-    location / {
-        try_files $uri $uri/ =404;
-    }
-}
+TodoMVC (frontend) is one service.
 
-Alternative: using a Node based static server
+Additional services could be introduced:
 
-If you prefer to use a node-based server instead of nginx, you could do something like:
+Auth Service (user login, sessions).
 
-FROM node:18-alpine
+Task Service (API + database for tasks).
 
-WORKDIR /app
+Storage Service (e.g., S3 or DynamoDB for persistent data).
 
-COPY package*.json ./
-COPY webpack.* ./
-COPY src ./src
-COPY . /app
+Each microservice runs in its own Deployment with a dedicated database (RDS, DynamoDB, etc.).
 
-RUN npm install --legacy-peer-deps
-RUN npm run build
+Communication happens via REST/gRPC between services.
 
-# install a lightweight static server globally, e.g. serve or http-server
-RUN npm install -g http-server
+Scaling is more flexible:
 
-EXPOSE 7001
+Heavy-load services (e.g., Auth) can scale independently.
 
-CMD ["http-server", "dist", "-p", "7001"]
+Costs are higher due to multiple AWS resources (databases, networking, storage).
 
-Steps to implement
-
-Create Dockerfile in the javascript-es6 folder (or top‐level, adjusting paths).
-
-Add .dockerignore to avoid copying node_modules, local build, etc.:
-
-node_modules
-dist
-*.log
-
-
-Build the docker image:
-
-docker build -t todomvc-es6 .
-
-
-Run it:
-
-docker run -d -p 8080:80 todomvc-es6
-
-
-(if using nginx based)
-or, if using node server on port 7001, map to host: -p 8080:7001 etc.
+This setup removes the monolithic database bottleneck and supports long-term extensibility.
